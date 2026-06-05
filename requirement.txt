@@ -1,0 +1,9 @@
+python-dotenv
+langchain-core
+langchain-groq
+langchain-openrouter
+langgraph
+fastapi
+uvicorn
+python-jose
+passlib
