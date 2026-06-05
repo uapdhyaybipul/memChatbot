@@ -15,21 +15,27 @@ api_key = os.getenv("GROQ_API_KEY")
 
 store = InMemoryStore()
 
-user_id = "u1"
-
-user_details = ("user", user_id, "details")
-
-
-store.put(user_details, "profile_1", {"data": "Name: Bipul"})
-store.put(user_details, "profile_2", {"data": "Profession: learning AI on stuffs"})
-store.put(user_details, "preference_1", {"data": "Prefers concise answers"})
-store.put(user_details, "preference_2", {"data": "Likes examples in Python"})
-store.put(user_details, "project_1", {"data": "Building MCP servers (Python-based project)"})
+def get_namespace(user_id: str, memory_type: str):
+    return ("user", user_id, memory_type)
 
 
-# ----------------------------
-# 2) System prompt template (your prompt)
-# ----------------------------
+#user_details = namespace
+
+#user/==>  First level - Memory category.
+# └── u1/ ==> Second level - User-specific identifier (e.g., user ID).
+#      └── details/ ==> Third level - Specific type of information (e.g., "details", "preferences", "projects").
+
+#store.put(user_details , key, value)  # Example: store.put(("user", "u1", "details"), "profile_1", {"data": "Name: Bipul"})
+store.put( get_namespace("u1", "profile"), "name", {"value": "Bipul"})
+
+store.put(    get_namespace("u1", "Learning"),  "profession",  {"value": "Learning AI"})
+
+store.put( get_namespace("u1", "preferences"), "answer_style", {"value": "Concise"})
+
+store.put(get_namespace("u1", "preferences"), "language", {"value": "Python"})
+
+store.put(get_namespace("u1", "projects"),    "project_1",    {"value": "Building MCP servers"})
+
 SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant with memory capabilities.
 If user-specific memory is available, use it to personalize 
 your responses based on what you know about the user.
@@ -58,27 +64,99 @@ The user’s memory (which may be empty) is provided as: {user_details_content}
 """
 
 
+def fetch_user_memory(store, user_id):
+
+    memory_types = ["profile","preferences", "projects","goals", "facts"]
+
+    memory = {}
+
+    for memory_type in memory_types:
+
+        namespace = get_namespace(user_id, memory_type)
+
+        items = store.search(namespace)
+
+        memory[memory_type] = {}
+
+        for item in items:
+            memory[memory_type][item.key] = item.value.get("value")
+
+    return memory
+
+
+def extract_prompt_variables(memory):
+
+    return {
+        "Name": memory.get("profile", {})
+                     .get("name", "User"),
+
+        "Profession": memory.get("profile", {})
+                           .get("profession", "Unknown"),
+
+        "AnswerStyle": memory.get("preferences", {})
+                            .get("answer_style", "Normal"),
+
+        "Language": memory.get("preferences", {})
+                          .get("language", "Unknown")
+    }
+
+
+def build_memory_context(memory):
+
+    lines = []
+
+    for category, values in memory.items():
+
+        if not values:
+            continue
+
+        lines.append(f"\n{category.upper()}:")
+
+        for key, value in values.items():
+            lines.append(f"- {key}: {value}")
+
+    return "\n".join(lines)
+
+def chat_node(state: MessagesState,config: RunnableConfig,store: BaseStore):
+
+    user_id = config["configurable"]["user_id"]
+
+    user_memory = fetch_user_memory( store, user_id)
+
+    print("Fetched User Memory:", user_memory)
+
+    prompt_variables = extract_prompt_variables(user_memory)
+
+    # Build readable memory context
+    memory_context = build_memory_context(user_memory)
+
+    system_message = SystemMessage(
+        content=SYSTEM_PROMPT_TEMPLATE.format(user_details_content=memory_context,Name=prompt_variables["Name"]) )
+    llm = ChatGroq(api_key=api_key, model=os.getenv("CHAT_MODEL"))
+
+    response = llm.invoke([system_message] + state["messages"])
+
+    print(response.content)
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("chat", chat_node)
+builder.add_edge(START, "chat")
+builder.add_edge("chat", END)
+
+graph = builder.compile(store=store)
+
 # ----------------------------
-# 3) Create the LLM and Graph
+# 4) Run it (provide user_id in config)
+# ----------------------------
+config = {"configurable": {"user_id": "u1"}}
 
-llm = ChatGroq(model=os.getenv("CHAT_MODEL"), api_key=api_key)
+result = graph.invoke(
+    {"messages": [{"role": "user", "content": "Explain gen ai in simple terms."}]},
+    config,
+)
 
-def chat_node(state:MessagesState, config:RunnableConfig, store:BaseStore):
-   
-   user_id = config["configurable"]["user_id"]
+print(result["messages"][-1].content)
 
-   #Read only: fetch user details from the store(memory ,no writes)
-   user_details = ("user",user_id,"details")
-   print("User details tuples:", user_details)
 
-   items= store.search(user_details)
-   print("User details fetched from store:", store.search(user_details))
-
-   if items:
-      user_details_content = "\n".join([f"{item['key']}: {item['value']['data']}" for item in items])
-   else:
-      user_details_content = "No user details available."
-
-   system_message = SystemMessage(content=SYSTEM_PROMPT_TEMPLATE.format(user_details_content=user_details_content,name="Bipul"))
-   print("System message content:", system_message.content)
-
+# chat_node(state=None, config={"configurable": {"user_id": "u1"}}, store=store)
